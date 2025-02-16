@@ -1,88 +1,184 @@
-Fluxo de Deploy de uma VM Windows no Proxmox
+Fluxo de Deploy de VM Windows no Proxmox
 
 Tecnologias Utilizadas
 
-Proxmox: Plataforma de virtualização onde a VM é criada.
+Proxmox: Plataforma de virtualização utilizada para hospedar e gerenciar as VMs.
 
-Cloud-Init: Utilizado para inicializar e configurar a VM no primeiro boot.
+Cloud-Init: Configuração inicial automatizada da VM, incluindo rede e credenciais.
 
-Ansible: Ferramenta de automação usada para interagir com a API do Proxmox e provisionar a VM.
+Ansible: Ferramenta de automação utilizada para interagir com a API do Proxmox e realizar a criação e configuração das VMs.
 
-YAML (YML): Formato utilizado para descrever o playbook do Ansible.
+YAML: Linguagem de formatação utilizada para escrever os playbooks do Ansible.
 
-QEMU: Hipervisor utilizado pelo Proxmox para executar as VMs.
+QEMU: Hypervisor utilizado pelo Proxmox para criar e gerenciar VMs.
 
-Cloudbase-Init: Equivalente ao Cloud-Init para Windows, permite configurar a VM automaticamente.
+Cloudbase-Init: Ferramenta utilizada para aplicar configurações de inicialização em VMs Windows.
 
-Groovy: Linguagem utilizada no pipeline do Jenkins.
+Groovy: Linguagem utilizada para escrever os pipelines no Jenkins.
 
-Jenkins: Orquestrador do pipeline de deploy da VM.
+Jenkins: Ferramenta de CI/CD utilizada para orquestrar a execução do playbook do Ansible.
 
-Etapas do Fluxo
+Fluxo do Deploy
 
-1. Início do Pipeline no Jenkins
+Execução da Pipeline no Jenkins
 
-O pipeline solicita ao usuário o nome da VM a ser criada.
+O pipeline solicita ao usuário o nome da VM.
 
-O nome da VM é validado para garantir que contenha apenas caracteres permitidos.
+Validação do nome da VM (evita caracteres inválidos).
 
-O nome validado é armazenado como variável de ambiente para ser utilizado posteriormente.
+Atribui o nome da VM a uma variável de ambiente.
 
-2. Execução do Playbook Ansible
+Execução do Playbook Ansible
 
-O pipeline executa o playbook create_vm_from_template_v_3.yml.
+O playbook se conecta à API do Proxmox.
 
-O playbook usa a API do Proxmox para clonar uma VM a partir de um template predefinido.
+Clona um template de VM Windows existente.
 
-Durante a clonagem, são definidos:
+Configura as interfaces de rede e VLANs.
 
-Nome da nova VM.
+Inicia a VM.
 
-ID da VM.
+Configuração da VM com Cloudbase-Init
 
-Armazenamento a ser utilizado.
+Aplica configurações de inicialização na VM Windows.
 
-Configuração de rede (interface e VLAN).
+Define credenciais de acesso.
 
-3. Provisionamento da VM via Ansible
+Configura rede e hostname automaticamente.
 
-O playbook interage com a API do Proxmox para:
+Validação e Finalização
 
-Clonar a VM a partir do template.
+O pipeline verifica se o playbook foi executado com sucesso.
 
-Configurar as interfaces de rede.
+Mensagem de sucesso é exibida.
 
-Ligar a VM após a configuração.
+Se houver erro, a execução é interrompida e os logs são exibidos.
 
-A execução de cada etapa é verificada para garantir que a VM foi criada corretamente.
+Código do Pipeline (Jenkinsfile)
 
-4. Inicialização da VM com Cloud-Init e Cloudbase-Init
+pipeline {
+    agent any
 
-Se a VM é Linux, o Cloud-Init será responsável pela configuração inicial.
+    environment {
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+        ANSIBLE_CONFIG = '/repo/ansible/ansible.cfg'
+    }
 
-Se a VM é Windows, Cloudbase-Init será utilizado para configurar credenciais e aplicações.
+    stages {
+        stage('Solicitar Nome da VM') {
+            steps {
+                script {
+                    def userInput = input(
+                        id: 'VM_NAME_INPUT',
+                        message: 'Por favor, insira o nome da VM:',
+                        parameters: [string(name: 'VM_NAME', defaultValue: '', description: 'Nome da VM a ser criada')]
+                    )
+                    
+                    if (!userInput || userInput.trim() == "") {
+                        error "O nome da VM não foi fornecido."
+                    }
 
-5. Validação e Finalização do Pipeline
+                    if (!userInput.matches(/^[a-zA-Z0-9.-]+$/)) {
+                        error "Nome inválido: ${userInput}"
+                    }
 
-O pipeline confirma que o playbook foi executado corretamente.
+                    env.VM_NAME = userInput
+                }
+            }
+        }
 
-Caso haja falhas, o pipeline exibe os erros encontrados.
+        stage('Executar Playbook Ansible') {
+            steps {
+                script {
+                    sh "ansible-playbook /repo/ansible/playbooks/create_vm_from_template_v_3.yml -e vm_name=${env.VM_NAME}"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline concluída!'
+        }
+    }
+}
 
-Se tudo ocorrer bem, a VM é entregue pronta para uso.
+Código do Playbook Ansible
 
-Resumo Visual do Fluxo
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    proxmox_api_url: "https://192.168.18.200:8006/api2/json"
+    proxmox_token: "root@pam!jenkins=TOKEN_AQUI"
+    node: "pve"
+    storage: "NVME_STORAGE"
+    template_id: 110
+    vmid: 207
+    network_bridge: "vmbr400"
+    vlan_tag: 400
 
-Usuário insere o nome da VM (Jenkins - Groovy)
+  tasks:
+    - name: Clonar o template
+      uri:
+        url: "{{ proxmox_api_url }}/nodes/{{ node }}/qemu/{{ template_id }}/clone"
+        method: POST
+        headers:
+          Authorization: "PVEAPIToken {{ proxmox_token }}"
+        body_format: json
+        body:
+          newid: "{{ vmid }}"
+          name: "{{ vm_name }}"
+          target: "{{ node }}"
+          full: true
+          storage: "{{ storage }}"
+        validate_certs: false
+      register: clone_vm
 
-Jenkins executa o playbook Ansible (Ansible - YAML)
+    - name: Verificar sucesso na clonagem
+      fail:
+        msg: "Erro: {{ clone_vm.json }}"
+      when: clone_vm.status != 200 or clone_vm.json.errors is defined
 
-Ansible clona a VM (Proxmox - API, QEMU)
+    - name: Aguardar clonagem
+      wait_for:
+        timeout: 300
 
-Configura interface de rede (Proxmox - API)
+    - name: Configurar rede da VM
+      uri:
+        url: "{{ proxmox_api_url }}/nodes/{{ node }}/qemu/{{ vmid }}/config"
+        method: POST
+        headers:
+          Authorization: "PVEAPIToken {{ proxmox_token }}"
+        body_format: json
+        body:
+          net0: "virtio,bridge={{ network_bridge }},tag={{ vlan_tag }},firewall=1"
+          onboot: 1
+          tags: "bi;cliente"
+          vga: "virtio"
+        validate_certs: false
+      register: configure_vm
 
-Inicia a VM (Proxmox - API, QEMU)
+    - name: Verificar configuração
+      fail:
+        msg: "Erro: {{ configure_vm.json }}"
+      when: configure_vm.status != 200 or configure_vm.json.errors is defined
 
-Configuração inicial (Cloud-Init ou Cloudbase-Init)
+    - name: Ligar a VM
+      uri:
+        url: "{{ proxmox_api_url }}/nodes/{{ node }}/qemu/{{ vmid }}/status/start"
+        method: POST
+        headers:
+          Authorization: "PVEAPIToken {{ proxmox_token }}"
+        validate_certs: false
+      register: start_vm
 
-VM pronta para uso
+    - name: Verificar inicialização
+      fail:
+        msg: "Erro: {{ start_vm.json }}"
+      when: start_vm.status != 200 or start_vm.json.errors is defined
+
+Conclusão
+
+Este documento descreve o fluxo de deploy automatizado de uma VM Windows no Proxmox utilizando Jenkins, Ansible, e Cloudbase-Init. O processo garante que a VM seja clonada corretamente, configurada e iniciada com sucesso.
 
